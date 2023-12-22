@@ -1,78 +1,75 @@
+import argparse
+
+parser = argparse.ArgumentParser(
+        description='This application is used to use a model for fruit classification in real time via the camera. Exit by pressing q.')
+
+parser.add_argument('-m', '--model', type=str, default='fruits.h5',
+                    help='Choose what model should be used. Specify the path of the model here.')
+parser.add_argument('-tr', '--train_path', type=str, default='fruits-360/Training',
+                    help='Specify the path of the training dataset here. Is required to identify the names of the classes.')
+parser.add_argument('-c', '--camera', type=int, default=0,
+                    help='Choose the index of the camera here. By default, the first camera found is chosen.')
+
+args = parser.parse_args()
+
+
+import cv2
 import numpy as np
-import matplotlib.pyplot as plt
-import tensorflow as tf
+from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.applications import ResNet50
-from tensorflow.keras.layers import Dense, BatchNormalization, GlobalAveragePooling2D
-from tensorflow.keras.models import Model
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.preprocessing import image
 
-train_path = 'fruits-360/Training'
-test_path = 'fruits-360/Test'
+model = load_model(args.model)
 
-# data preprocessing
-train_datagen = ImageDataGenerator(rescale=1./255, 
-                                   shear_range=0.2, 
-                                   zoom_range=0.2, 
-                                   horizontal_flip=True)
+temp_datagen = ImageDataGenerator(rescale=1./255)
+temp_generator = temp_datagen.flow_from_directory(
+    args.train_path,
+    target_size=(100, 100),
+    batch_size=32,
+    class_mode='categorical',
+    shuffle=False)
 
-test_datagen = ImageDataGenerator(rescale=1./255)
+class_names = list(temp_generator.class_indices.keys())
 
-train_generator = train_datagen.flow_from_directory(train_path, 
-                                                    target_size=(100, 100), 
-                                                    batch_size=32, 
-                                                    class_mode='categorical')
+cap = cv2.VideoCapture(args.camera)
 
-test_generator = test_datagen.flow_from_directory(test_path, 
-                                                  target_size=(100, 100), 
-                                                  batch_size=32, 
-                                                  class_mode='categorical')
+while True:
+    ret, frame = cap.read()
 
-# ResNet50, pre-trained on ImageNet
-base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(100, 100, 3))
+    if not ret:
+        break
 
-# building neural network
-x = base_model.output
+    # preprocess image
+    # resize image
+    resized_frame = cv2.resize(frame, (100, 100))
+    # convert image color to array
+    img_array = image.img_to_array(resized_frame)
+    # normalize the image
+    img_array = img_array / 255.0
+    # expand dimensions to match batch size
+    img_array = np.expand_dims(img_array, axis=0)
 
-# global average pooling to reduce number of features
-x = GlobalAveragePooling2D()(x)
+    predictions = model.predict(img_array)
 
-# less neurons to reduce computational complexity
-x = Dense(1024, activation='relu')(x)
+    sorted_indices = np.argsort(predictions[0])[::-1]
 
-# for faster convergence
-x = BatchNormalization()(x)
+    top_n = 10
+    for i in range(top_n):
+        idx = sorted_indices[i]
+        probability = predictions[0][idx]
+        cv2.putText(frame, 
+                    f'{class_names[idx]} ({probability:.2f}%)', 
+                    (10, 30 + i*35), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 
+                    1, 
+                    (0, 255, 0), 
+                    2)
 
-# softmax activation function in last layer
-predictions = Dense(train_generator.num_classes, activation='softmax')(x)
+    cv2.imshow('Frame', frame)
 
-# target model
-model = Model(inputs=base_model.input, outputs=predictions)
+    # press 'q' to exit loop
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-# train top layers first (randomly initialized!!)
-for layer in base_model.layers:
-    layer.trainable = False
-
-model.compile(optimizer=Adam(learning_rate=0.0001), loss='categorical_crossentropy', metrics=['accuracy'])
-
-# training
-history = model.fit(train_generator, 
-                    steps_per_epoch=train_generator.samples//train_generator.batch_size, 
-                    epochs=10, 
-                    validation_data=test_generator, 
-                    validation_steps=test_generator.samples//test_generator.batch_size)
-
-# plot history
-plt.plot(history.history['accuracy'], label='accuracy')
-plt.plot(history.history['val_accuracy'], label = 'val_accuracy')
-plt.xlabel('Epoch')
-plt.ylabel('Accuracy')
-plt.ylim([0, 1])
-plt.legend(loc='lower right')
-
-# evaluation
-test_loss, test_acc = model.evaluate(test_generator, steps=test_generator.samples//test_generator.batch_size)
-print(f"Test Accuracy: {test_acc}")
-
-# save model
-model.save('fruits.h5')
+cap.release()
+cv2.destroyAllWindows()
